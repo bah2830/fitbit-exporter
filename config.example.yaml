@@ -1,0 +1,10 @@
+fitbit:
+  clientId: 12AB3C
+  clientSecret: place-client-secret-for-app-here
+
+database:
+  database:
+  host: localhost:3306
+  username: root
+  password: fitbit
+  database: fitbit

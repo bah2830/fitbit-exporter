@@ -1,0 +1,28 @@
+version: '3.5'
+
+services:
+  mariadb:
+    image: linuxserver/mariadb
+    restart: always
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: America/Chicago
+      MYSQL_ROOT_PASSWORD: "fitbit"
+      MYSQL_DATABASE: "fitbit"
+    volumes:
+      - "${PWD}/dbdata:/config"
+    networks:
+      - backend
+  app:
+    image: fitbit-exporter
+    restart: always
+    ports:
+      - "3000:3000"
+    networks:
+      - backend
+    depends_on:
+      - "mariadb"
+networks:
+  backend:
+    external: false
