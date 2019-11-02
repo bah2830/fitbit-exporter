@@ -12,5 +12,5 @@
 *.out
 
 # repo artifacts
-exporter
+fitbit-exporter
 config.yaml
