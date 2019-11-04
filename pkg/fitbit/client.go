@@ -85,7 +85,7 @@ func (c *Client) StartAuthEndpoints() error {
 	}
 
 	// If a previous token was found and it hasn't expired then use it rather than wait for auth
-	if token != nil && token.Expiry.After(time.Now()) {
+	if token != nil {
 		c.token = token
 		c.httpClient = defaultOauthConfig(c.clientID, c.clientSecret).Client(oauth2.NoContext, c.token)
 		c.authenticated.Done()
@@ -139,7 +139,7 @@ func (c *Client) WaitForAuth() {
 func (c *Client) getPreviousToken() (*oauth2.Token, error) {
 	var accessToken, refreshToken, tokenType, expiration string
 	err := c.db.GetDB().
-		QueryRow("select access_token, refresh_token, token_type, expiration from fitbit_token").
+		QueryRow("select access_token, refresh_token, token_type, expiration from token").
 		Scan(&accessToken, &refreshToken, &tokenType, &expiration)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -169,11 +169,11 @@ func (c *Client) saveToken() error {
 	}
 
 	// Delete all previos tokens
-	if _, err := c.db.GetDB().Exec("delete from fitbit_token"); err != nil {
+	if _, err := c.db.GetDB().Exec("delete from token"); err != nil {
 		return err
 	}
 
-	insertStatement := `insert into fitbit_token
+	insertStatement := `insert into token
 		(access_token, refresh_token, token_type, expiration)
 		values (?, ?, ?, ?)`
 
@@ -189,4 +189,22 @@ func (c *Client) saveToken() error {
 	}
 
 	return nil
+}
+
+func (c *Client) Close() error {
+	defer c.httpClient.CloseIdleConnections()
+
+	// Get the current token and save it. This will help prevent a refreshed token from being missed
+	oauthTransport, ok := c.httpClient.Transport.(*oauth2.Transport)
+	if !ok {
+		return nil
+	}
+
+	token, err := oauthTransport.Source.Token()
+	if err != nil {
+		return err
+	}
+
+	c.token = token
+	return c.saveToken()
 }

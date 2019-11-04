@@ -29,11 +29,14 @@ func (e *Exporter) Start() error {
 	if err := e.client.StartAuthEndpoints(); err != nil {
 		return err
 	}
-
 	return e.startBackfiller()
 }
 
 func (e *Exporter) Stop() error {
+	if err := e.client.Close(); err != nil {
+		return err
+	}
+
 	return e.stopBackfiller()
 }
 

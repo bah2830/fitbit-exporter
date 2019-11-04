@@ -2,7 +2,9 @@ package fitbit
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
+	"strings"
 	"time"
 )
 
@@ -139,7 +141,7 @@ func (c *Client) SaveHeartRateData(data *HeartRateData) error {
 		if err := db.QueryRow("select count(*) from heart_rest where date = ?", day).Scan(&count); err != nil {
 			return err
 		}
-		if count == 0 {
+		if count == 0 && dayOverview.Value.RestingHeartRate != 0 {
 			_, err := db.Exec(
 				"insert into heart_rest (date, value) values (?, ?)",
 				day,
@@ -176,24 +178,51 @@ func (c *Client) SaveHeartRateData(data *HeartRateData) error {
 		}
 	}
 
-	// Save the intraday data if not already exists
-	for _, d := range data.IntraDay.Data {
-		// Check to see if the data already exists
-		var count int
-		dateTime := day + " " + d.Time
-		if err := db.QueryRow("select count(*) from heart_data where date = ?", dateTime).Scan(&count); err != nil {
+	// Get list of every existing datapoint on this day
+	existingDates := make([]string, 0, 2000)
+	rows, err := db.Query("select date from heart_data where date between ? and ?", day+" 00:00:00", day+" 23:59:59")
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var date string
+		if err := rows.Scan(&date); err != nil {
 			return err
 		}
-		if count > 0 {
+		existingDates = append(existingDates, date)
+	}
+
+	// Breakup any intraday data into chunks of 200 to bulk insert
+	var intradayChunks [][]string
+	currentChunk := make([]string, 0, 200)
+
+INTRA_LOOP:
+	for i, d := range data.IntraDay.Data {
+		if d.Value == 0 {
 			continue
 		}
 
-		_, err := db.Exec(
-			"insert into heart_data (date, value) values (?, ?)",
-			dateTime,
-			d.Value,
-		)
-		if err != nil {
+		// Check if the date was alround found in the database
+		for _, date := range existingDates {
+			if date == day+" "+d.Time {
+				continue INTRA_LOOP
+			}
+		}
+
+		currentChunk = append(currentChunk, fmt.Sprintf("('%s', %d)", day+" "+d.Time, d.Value))
+		if i != 0 && i%200 == 0 {
+			intradayChunks = append(intradayChunks, currentChunk)
+			currentChunk = make([]string, 0, 200)
+		}
+	}
+	if len(currentChunk) > 0 {
+		intradayChunks = append(intradayChunks, currentChunk)
+	}
+
+	// Insert 200 data points at a time to help take load off the database connection
+	insertQuery := "insert into heart_data (date, value) values "
+	for _, chunk := range intradayChunks {
+		if _, err := db.Exec(insertQuery + strings.Join(chunk, ", ")); err != nil {
 			return err
 		}
 	}
