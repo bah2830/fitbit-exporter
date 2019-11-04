@@ -1,10 +1,11 @@
 fitbit:
   clientId: 12AB3C
   clientSecret: place-client-secret-for-app-here
+  backfillStart: "2019-01-01"
 
 database:
   database:
   host: localhost:3306
-  username: root
+  username: fitbit
   password: fitbit
   database: fitbit

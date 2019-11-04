@@ -8,8 +8,9 @@ import (
 
 type Config struct {
 	Fitbit struct {
-		ClientID     string `yaml:"clientId"`
-		ClientSecret string `yaml:"clientSecret"`
+		ClientID      string `yaml:"clientId"`
+		ClientSecret  string `yaml:"clientSecret"`
+		BackfillStart string `yaml:"backfillStart"`
 	} `yaml:"fitbit"`
 	Database struct {
 		Host     string

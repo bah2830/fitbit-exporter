@@ -72,6 +72,16 @@ func (c *Client) GetHeartData(opts HeartRateOptions) (*HeartRateData, error) {
 		return nil, err
 	}
 
+	if resp.StatusCode > 299 {
+		errData := &RequestError{}
+		if err := json.Unmarshal(b, errData); err != nil {
+			return nil, err
+		}
+		errData.Code = resp.StatusCode
+
+		return nil, errData
+	}
+
 	data := &HeartRateData{}
 	if err := json.Unmarshal(b, data); err != nil {
 		return nil, err
@@ -115,4 +125,78 @@ func GetHeartRateDetailLevel(level HeartRateDetailLevel) *HeartRateDetailLevel {
 
 func GetHeartRatePeriod(period HeartRatePeriod) *HeartRatePeriod {
 	return &period
+}
+
+func (c *Client) SaveHeartRateData(data *HeartRateData) error {
+	db := c.db.GetDB()
+
+	var day string
+	for _, dayOverview := range data.OverviewByDay {
+		day = dayOverview.Date
+
+		// Save the resting heart rate if it hasn't been already
+		var count int
+		if err := db.QueryRow("select count(*) from heart_rest where date = ?", day).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			_, err := db.Exec(
+				"insert into heart_rest (date, value) values (?, ?)",
+				day,
+				dayOverview.Value.RestingHeartRate,
+			)
+			if err != nil {
+				return err
+			}
+		}
+
+		// Save the zone data if not already exists
+		for _, zone := range dayOverview.Value.Zones {
+			var count int
+			r := db.QueryRow(
+				"select count(*) from heart_zone where date = ? and type = ?",
+				day,
+				zone.Name,
+			)
+			if err := r.Scan(&count); err != nil {
+				return err
+			}
+			if count == 0 {
+				_, err := db.Exec(
+					"insert into heart_zone (date, type, minutes, calories) values (?, ?, ?, ?)",
+					day,
+					zone.Name,
+					zone.Minutes,
+					zone.CaloriesOut,
+				)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	// Save the intraday data if not already exists
+	for _, d := range data.IntraDay.Data {
+		// Check to see if the data already exists
+		var count int
+		dateTime := day + " " + d.Time
+		if err := db.QueryRow("select count(*) from heart_data where date = ?", dateTime).Scan(&count); err != nil {
+			return err
+		}
+		if count > 0 {
+			continue
+		}
+
+		_, err := db.Exec(
+			"insert into heart_data (date, value) values (?, ?)",
+			dateTime,
+			d.Value,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

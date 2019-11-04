@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +31,27 @@ type Client struct {
 	clientSecret  string
 	db            *database.Database
 	authenticated *sync.WaitGroup
+}
+
+type RequestError struct {
+	Code   int
+	Errors []struct {
+		ErrorType string `json:"errorType"`
+		FieldName string `json:"fieldName"`
+		Message   string `json:"message"`
+	} `json:"errors"`
+}
+
+func (e *RequestError) Error() string {
+	return fmt.Sprintf("ERROR (%d): %s", e.Code, e.string())
+}
+
+func (e *RequestError) string() string {
+	var msg string
+	for _, m := range e.Errors {
+		msg += m.Message + " "
+	}
+	return strings.TrimSpace(msg)
 }
 
 func NewClient(db *database.Database, clientID, clientSecret string) (*Client, error) {
@@ -144,6 +166,11 @@ func (c *Client) getPreviousToken() (*oauth2.Token, error) {
 func (c *Client) saveToken() error {
 	if c.token == nil {
 		return nil
+	}
+
+	// Delete all previos tokens
+	if _, err := c.db.GetDB().Exec("delete from fitbit_token"); err != nil {
+		return err
 	}
 
 	insertStatement := `insert into fitbit_token

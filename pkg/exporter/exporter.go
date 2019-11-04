@@ -4,7 +4,11 @@ import (
 	"github.com/bah2830/fitbit-exporter/pkg/config"
 	"github.com/bah2830/fitbit-exporter/pkg/database"
 	"github.com/bah2830/fitbit-exporter/pkg/fitbit"
-	"github.com/davecgh/go-spew/spew"
+)
+
+const (
+	dateFormat     = "2006-01-02"
+	dateTimeFormat = "2006-01-02 15:04:05"
 )
 
 type Exporter struct {
@@ -26,29 +30,19 @@ func (e *Exporter) Start() error {
 		return err
 	}
 
-	e.startWorker()
-	return nil
+	return e.startBackfiller()
 }
 
 func (e *Exporter) Stop() error {
-	return e.stopWorker()
+	return e.stopBackfiller()
 }
 
-func (e *Exporter) startWorker() error {
+func (e *Exporter) startBackfiller() error {
 	// Wait for auth to occur before continuing
 	e.client.WaitForAuth()
-
-	d, err := e.client.GetHeartData(fitbit.HeartRateOptions{
-		DetailLevel: fitbit.GetHeartRateDetailLevel(fitbit.HeartRateDetailLevel1Sec),
-	})
-	if err != nil {
-		return err
-	}
-
-	spew.Dump(d)
-	return nil
+	return e.backfill()
 }
 
-func (e *Exporter) stopWorker() error {
+func (e *Exporter) stopBackfiller() error {
 	return nil
 }
