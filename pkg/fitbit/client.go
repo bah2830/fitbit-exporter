@@ -23,6 +23,7 @@ const (
 )
 
 var requiredScopes = []string{
+	"profile",
 	"heartrate",
 }
 

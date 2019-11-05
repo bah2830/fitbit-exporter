@@ -3,6 +3,7 @@ package exporter
 import (
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"math"
@@ -104,6 +105,11 @@ func gzipHandler(fn http.HandlerFunc) http.HandlerFunc {
 }
 
 func (e *Exporter) indexHandler(w http.ResponseWriter, r *http.Request) {
+	if e.user == nil {
+		writeErr(w, http.StatusForbidden, errors.New("login required"))
+		return
+	}
+
 	top10Hr, err := e.client.GetNHeartRates(true, 10)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)

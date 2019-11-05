@@ -19,6 +19,7 @@ type Exporter struct {
 	cfg             *config.Config
 	backfillRunning bool
 	backfillLastRun time.Time
+	user            *fitbit.User
 }
 
 func New(cfg *config.Config, client *fitbit.Client, db *database.Database) *Exporter {
@@ -33,6 +34,15 @@ func (e *Exporter) Start() error {
 	if err := e.startFrontend(); err != nil {
 		return err
 	}
+
+	// Wait for auth to occur before continuing
+	e.client.WaitForAuth()
+
+	user, err := e.client.GetCurrentUser()
+	if err != nil {
+		return err
+	}
+	e.user = user
 
 	if err := e.startBackfiller(); err != nil {
 		return err
@@ -56,9 +66,6 @@ func (e *Exporter) startBackfiller() error {
 	defer func() {
 		e.backfillRunning = false
 	}()
-
-	// Wait for auth to occur before continuing
-	e.client.WaitForAuth()
 
 	e.backfillRunning = true
 	e.backfillLastRun = time.Now()
