@@ -1,9 +1,7 @@
 package fitbit
 
 import (
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"strings"
 	"time"
 )
@@ -51,6 +49,7 @@ type HeartRateZone struct {
 	Max         int     `json:"max"`
 	Min         int     `json:"Min"`
 	Minutes     int     `json:"minutes"`
+	Date        string
 }
 
 type HeartData struct {
@@ -64,28 +63,8 @@ func (c *Client) GetHeartData(opts HeartRateOptions) (*HeartRateData, error) {
 		return nil, err
 	}
 
-	resp, err := c.httpClient.Get(path)
-	if err != nil {
-		return nil, err
-	}
-
-	b, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode > 299 {
-		errData := &RequestError{}
-		if err := json.Unmarshal(b, errData); err != nil {
-			return nil, err
-		}
-		errData.Code = resp.StatusCode
-
-		return nil, errData
-	}
-
 	data := &HeartRateData{}
-	if err := json.Unmarshal(b, data); err != nil {
+	if err := c.get(path, data); err != nil {
 		return nil, err
 	}
 
@@ -228,4 +207,228 @@ INTRA_LOOP:
 	}
 
 	return nil
+}
+
+func (c *Client) GetNHeartRates(top bool, limit int) ([]HeartData, error) {
+	order := "DESC"
+	agg := "max"
+	if !top {
+		order = "ASC"
+		agg = "min"
+	}
+
+	query := fmt.Sprintf(
+		`select
+			date,
+			%s(value) as value
+		from heart_data
+		group by DATE_FORMAT(date, '%%Y-%%m-%%d')
+		order by %s(value) %s
+		limit %d`,
+		agg,
+		agg,
+		order,
+		limit,
+	)
+	rows, err := c.db.GetDB().Query(query)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]HeartData, 0, limit)
+	for rows.Next() {
+		var date string
+		var value int
+
+		if err := rows.Scan(&date, &value); err != nil {
+			return nil, err
+		}
+
+		results = append(results, HeartData{
+			Time:  date,
+			Value: value,
+		})
+	}
+
+	return results, nil
+}
+
+func (c *Client) GetResting(top bool) (*HeartData, error) {
+	order := "DESC"
+	if !top {
+		order = "ASC"
+	}
+
+	var date string
+	var value int
+	query := fmt.Sprintf("select DATE_FORMAT(date, '%%Y-%%m-%%d'), value from heart_rest order by value %s", order)
+	if err := c.db.GetDB().QueryRow(query).Scan(&date, &value); err != nil {
+		return nil, err
+	}
+
+	return &HeartData{
+		Time:  date,
+		Value: value,
+	}, nil
+}
+
+func (c *Client) GetCurrentResting() (int, error) {
+	var value int
+	query := "select value from heart_rest where date_format(date, '%Y-%m-%d') = date_format(now(), '%Y-%m-%d')"
+	if err := c.db.GetDB().QueryRow(query).Scan(&value); err != nil {
+		return 0, err
+	}
+
+	return value, nil
+}
+
+func (c *Client) GetCurrentDaysData() ([]HeartData, error) {
+	query := "select date, value from heart_data where date_format(date, '%Y-%m-%d') = date_format(now(), '%Y-%m-%d')"
+	rows, err := c.db.GetDB().Query(query)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]HeartData, 0, 2000)
+	for rows.Next() {
+		var date string
+		var value int
+		if err := rows.Scan(&date, &value); err != nil {
+			return nil, err
+		}
+		results = append(results, HeartData{
+			Time:  date,
+			Value: value,
+		})
+	}
+
+	return results, nil
+}
+
+func (c *Client) GetCurrentDayLimit(top bool) (*HeartData, error) {
+	order := "DESC"
+	if !top {
+		order = "ASC"
+	}
+
+	query := fmt.Sprintf(
+		"select date, value from heart_data where date_format(date, '%%Y-%%m-%%d') = date_format(now(), '%%Y-%%m-%%d') order by value %s",
+		order,
+	)
+
+	var date string
+	var value int
+	if err := c.db.GetDB().QueryRow(query).Scan(&date, &value); err != nil {
+		return nil, err
+	}
+
+	return &HeartData{
+		Time:  date,
+		Value: value,
+	}, nil
+}
+
+func (c *Client) GetCurrentDayZones() ([]HeartRateZone, error) {
+	query := `select
+		type,
+		minutes,
+		calories
+	from heart_zone
+	where
+		date_format(date, '%Y-%m-%d') = date_format(now(), '%Y-%m-%d')`
+
+	rows, err := c.db.GetDB().Query(query)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]HeartRateZone, 0, 4)
+	for rows.Next() {
+		var zoneType string
+		var minutes, calories int
+		if err := rows.Scan(&zoneType, &minutes, &calories); err != nil {
+			return nil, err
+		}
+
+		results = append(results, HeartRateZone{
+			Name:        zoneType,
+			CaloriesOut: float64(calories),
+			Minutes:     minutes,
+		})
+
+	}
+	return results, nil
+}
+
+func (c *Client) GetZonesByDate(startDate, endDate time.Time) ([]HeartRateZone, error) {
+	query := `select
+		type,
+		minutes,
+		calories
+	from heart_zone
+	where
+		date between ? and ?
+	order by date, type`
+
+	rows, err := c.db.GetDB().Query(query, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]HeartRateZone, 0, 4)
+	for rows.Next() {
+		var zoneType string
+		var minutes, calories int
+		if err := rows.Scan(&zoneType, &minutes, &calories); err != nil {
+			return nil, err
+		}
+
+		results = append(results, HeartRateZone{
+			Name:        zoneType,
+			CaloriesOut: float64(calories),
+			Minutes:     minutes,
+		})
+
+	}
+	return results, nil
+}
+
+func (c *Client) GetMaxZones() (map[string]HeartRateZone, error) {
+	query := `select
+		date,
+		type,
+		minutes,
+		calories
+	from heart_zone
+	where
+		(type, minutes) in (
+			select
+				type,
+				max(minutes)
+			from heart_zone
+			group by type
+		)`
+
+	rows, err := c.db.GetDB().Query(query)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make(map[string]HeartRateZone)
+	for rows.Next() {
+		var date, zoneType string
+		var minutes, calories int
+		if err := rows.Scan(&date, &zoneType, &minutes, &calories); err != nil {
+			return nil, err
+		}
+
+		results[zoneType] = HeartRateZone{
+			Date:        date,
+			Name:        zoneType,
+			CaloriesOut: float64(calories),
+			Minutes:     minutes,
+		}
+
+	}
+	return results, nil
 }

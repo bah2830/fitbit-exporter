@@ -28,6 +28,7 @@ func Open(cfg *config.Config) (*Database, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxIdleConns(0)
 
 	return &Database{db: db, cfg: cfg}, nil
 }

@@ -2,9 +2,11 @@ package fitbit
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
-	"log"
+	"io/ioutil"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +29,7 @@ var requiredScopes = []string{
 type Client struct {
 	httpClient    *http.Client
 	token         *oauth2.Token
+	oauthConfig   *oauth2.Config
 	clientID      string
 	clientSecret  string
 	db            *database.Database
@@ -34,8 +37,9 @@ type Client struct {
 }
 
 type RequestError struct {
-	Code   int
-	Errors []struct {
+	Code       int
+	RetryAfter time.Duration
+	Errors     []struct {
 		ErrorType string `json:"errorType"`
 		FieldName string `json:"fieldName"`
 		Message   string `json:"message"`
@@ -64,6 +68,9 @@ func NewClient(db *database.Database, clientID, clientSecret string) (*Client, e
 
 	// Set a wait on the authenticated check
 	client.authenticated.Add(1)
+	if err := client.setupAuth(); err != nil {
+		return nil, err
+	}
 
 	return client, nil
 }
@@ -78,7 +85,9 @@ func defaultOauthConfig(clientID, clientSecret string) *oauth2.Config {
 	}
 }
 
-func (c *Client) StartAuthEndpoints() error {
+func (c *Client) setupAuth() error {
+	c.oauthConfig = defaultOauthConfig(c.clientID, c.clientSecret)
+
 	token, err := c.getPreviousToken()
 	if err != nil {
 		return err
@@ -87,44 +96,40 @@ func (c *Client) StartAuthEndpoints() error {
 	// If a previous token was found and it hasn't expired then use it rather than wait for auth
 	if token != nil {
 		c.token = token
-		c.httpClient = defaultOauthConfig(c.clientID, c.clientSecret).Client(oauth2.NoContext, c.token)
+		c.httpClient = c.oauthConfig.Client(oauth2.NoContext, c.token)
 		c.authenticated.Done()
 	}
 
-	config := defaultOauthConfig(c.clientID, c.clientSecret)
+	return nil
+}
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		url := config.AuthCodeURL("")
-		http.Redirect(w, r, url, http.StatusTemporaryRedirect)
-	})
+func (c *Client) LoginHandler(w http.ResponseWriter, r *http.Request) {
+	url := c.oauthConfig.AuthCodeURL("")
+	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+}
 
-	http.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		if c.token == nil {
-			code := r.FormValue("code")
+func (c *Client) CallbackHandler(w http.ResponseWriter, r *http.Request) {
+	if c.token == nil {
+		code := r.FormValue("code")
 
-			var err error
-			c.token, err = config.Exchange(oauth2.NoContext, code)
-			if err != nil {
-				// If err getting a token then redirect to the root path to get a valid login token
-				http.Redirect(w, r, listenURL, http.StatusTemporaryRedirect)
-				return
-			}
-
-			// Setup the http client
-			c.httpClient = defaultOauthConfig(c.clientID, c.clientSecret).Client(oauth2.NoContext, c.token)
-			c.authenticated.Done()
-			if err := c.saveToken(); err != nil {
-				w.Write([]byte(err.Error()))
-				return
-			}
+		var err error
+		c.token, err = c.oauthConfig.Exchange(oauth2.NoContext, code)
+		if err != nil {
+			// If err getting a token then redirect to the root path to get a valid login token
+			http.Redirect(w, r, listenURL, http.StatusTemporaryRedirect)
+			return
 		}
 
-		w.Write([]byte("Login Successful"))
-	})
+		// Setup the http client
+		c.httpClient = defaultOauthConfig(c.clientID, c.clientSecret).Client(oauth2.NoContext, c.token)
+		c.authenticated.Done()
+		if err := c.saveToken(); err != nil {
+			w.Write([]byte(err.Error()))
+			return
+		}
+	}
 
-	log.Println("listening on localhost:3000")
-	go http.ListenAndServe(":3000", nil)
-	return nil
+	http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 }
 
 func (c *Client) WaitForAuth() {
@@ -207,4 +212,41 @@ func (c *Client) Close() error {
 
 	c.token = token
 	return c.saveToken()
+}
+
+func (c *Client) get(path string, output interface{}) error {
+	resp, err := c.httpClient.Get(path)
+	if err != nil {
+		return err
+	}
+
+	b, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode > 299 {
+		errData := &RequestError{}
+		if err := json.Unmarshal(b, errData); err != nil {
+			return err
+		}
+		errData.Code = resp.StatusCode
+
+		retryAfterStr := resp.Header.Get("Retry-After")
+		if retryAfterStr != "" {
+			retryAfter, err := strconv.Atoi(retryAfterStr)
+			if err != nil {
+				return err
+			}
+			errData.RetryAfter = time.Duration(retryAfter+30) * time.Second
+		}
+
+		return errData
+	}
+
+	if err := json.Unmarshal(b, output); err != nil {
+		return err
+	}
+
+	return nil
 }

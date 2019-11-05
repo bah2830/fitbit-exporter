@@ -1,7 +1,9 @@
 package exporter
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -9,7 +11,7 @@ import (
 	"github.com/bah2830/fitbit-exporter/pkg/fitbit"
 )
 
-const fitbitCallsPerHour = 150
+const fitbitCallsPerHour = 250
 
 func (e *Exporter) backfill() error {
 	log.Print("Starting fitbit data backfill...")
@@ -49,7 +51,7 @@ func (e *Exporter) backfill() error {
 	total := time.Since(startDate)
 	days := total.Hours() / 24.0
 
-	// With 150 calls per day and 1 call per day get the hours required for all calls
+	// With 250 api calls per hour and 1 api call per day get the total time required to make all calls
 	apiCallHours := days / float64(fitbitCallsPerHour)
 
 	log.Printf("Backfill requires %.0f api calls with an ETA of %.2f hrs", days, apiCallHours)
@@ -57,37 +59,13 @@ func (e *Exporter) backfill() error {
 	// Loop through every day from the start date up until today.
 	// Because of rate limits on the fitbit api we have to check for the too many calls response
 	// When too many calls is hit we wait until the next hour mark for it reset and continue
-	for date := startDate; date.Before(time.Now().UTC()); date = date.Add(24 * time.Hour) {
-		// Copy the date so the pointer reference can be sent without affecting the loop.
-		dateOpts := date
-
-		d, err := e.client.GetHeartData(fitbit.HeartRateOptions{
-			StartDate:   &dateOpts,
-			EndDate:     &dateOpts,
-			DetailLevel: fitbit.GetHeartRateDetailLevel(fitbit.HeartRateDetailLevel1Min),
-		})
+	for date := startDate; !date.After(time.Now().UTC()); date = date.Add(24 * time.Hour) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Hour)
+		d, err := e.getHeartData(ctx, date)
 		if err != nil {
-			if requestErr, ok := err.(*fitbit.RequestError); ok {
-				// If this is a rate limit hit then just sleep until the hour is up and try again
-				if requestErr.Code == http.StatusTooManyRequests {
-					sleepUntil := time.Now().Truncate(time.Hour).Add(62 * time.Minute)
-					sleepTime := sleepUntil.Sub(time.Now())
-					log.Printf(
-						"Rate limit hit, waiting until next hour to continue %s (%.0f min)",
-						sleepUntil.Format(dateTimeFormat),
-						sleepTime.Minutes(),
-					)
-
-					// Set the date back so the next call will repeat this one
-					date = date.Add(-24 * time.Hour)
-
-					time.Sleep(sleepTime)
-					continue
-				}
-
-			}
 			return err
 		}
+		cancel()
 
 		if err := e.client.SaveHeartRateData(d); err != nil {
 			return err
@@ -96,4 +74,40 @@ func (e *Exporter) backfill() error {
 
 	log.Printf("Backfill completed... completed in %s", time.Since(startTime).String())
 	return nil
+}
+
+// getHeartData will attempt to get the heart rate data from the api
+// repeatidly until it no longer has a rate limit error or the timeout occurs
+func (e *Exporter) getHeartData(ctx context.Context, date time.Time) (*fitbit.HeartRateData, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("timeout waiting to get api data")
+		default:
+			d, err := e.client.GetHeartData(fitbit.HeartRateOptions{
+				StartDate:   &date,
+				EndDate:     &date,
+				DetailLevel: fitbit.GetHeartRateDetailLevel(fitbit.HeartRateDetailLevel1Min),
+			})
+			if err != nil {
+				if requestErr, ok := err.(*fitbit.RequestError); ok {
+					// If this is a rate limit hit then just sleep until the hour is up and try again
+					if requestErr.Code == http.StatusTooManyRequests {
+						retryTime := time.Now().Add(requestErr.RetryAfter)
+						log.Printf(
+							"Rate limit hit, waiting %s and trying again (%s)",
+							requestErr.RetryAfter.String(),
+							retryTime.Format(dateTimeFormat),
+						)
+						time.Sleep(requestErr.RetryAfter)
+						continue
+					}
+
+				}
+				return nil, err
+			}
+
+			return d, nil
+		}
+	}
 }
