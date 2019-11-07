@@ -2,11 +2,14 @@ package main
 
 import (
 	"flag"
+	"os"
+	"os/signal"
 
 	"github.com/bah2830/fitbit-exporter/pkg/config"
 	"github.com/bah2830/fitbit-exporter/pkg/database"
 	"github.com/bah2830/fitbit-exporter/pkg/exporter"
 	"github.com/bah2830/fitbit-exporter/pkg/fitbit"
+	"github.com/bah2830/fitbit-exporter/pkg/webserver"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 )
@@ -36,8 +39,16 @@ func main() {
 	}
 
 	exporter := exporter.New(conf, client, db)
-	if err := exporter.Start(); err != nil {
+	go exporter.Start()
+	defer exporter.Stop()
+
+	server := webserver.New(conf, client, exporter)
+	if err := server.Start(); err != nil {
 		panic(err)
 	}
-	defer exporter.Stop()
+	defer server.Stop()
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	<-c
 }

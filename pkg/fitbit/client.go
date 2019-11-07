@@ -35,6 +35,7 @@ type Client struct {
 	clientSecret  string
 	db            *database.Database
 	authenticated *sync.WaitGroup
+	authComplete  bool
 }
 
 type RequestError struct {
@@ -99,6 +100,7 @@ func (c *Client) setupAuth() error {
 		c.token = token
 		c.httpClient = c.oauthConfig.Client(oauth2.NoContext, c.token)
 		c.authenticated.Done()
+		c.authComplete = true
 	}
 
 	return nil
@@ -124,6 +126,7 @@ func (c *Client) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		// Setup the http client
 		c.httpClient = defaultOauthConfig(c.clientID, c.clientSecret).Client(oauth2.NoContext, c.token)
 		c.authenticated.Done()
+		c.authComplete = true
 		if err := c.saveToken(); err != nil {
 			w.Write([]byte(err.Error()))
 			return
@@ -131,6 +134,10 @@ func (c *Client) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+}
+
+func (c *Client) IsAuthenticated() bool {
+	return c.authComplete
 }
 
 func (c *Client) WaitForAuth() {

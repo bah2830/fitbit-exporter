@@ -7,11 +7,15 @@ import (
 )
 
 type Config struct {
+	WebFrontend struct {
+		Listen     string
+		SessionKey string `yaml:"sessionKey"`
+	} `yaml:"webFrontend"`
 	Fitbit struct {
 		ClientID      string `yaml:"clientId"`
 		ClientSecret  string `yaml:"clientSecret"`
 		BackfillStart string `yaml:"backfillStart"`
-	} `yaml:"fitbit"`
+	}
 	Database struct {
 		Host     string
 		Username string

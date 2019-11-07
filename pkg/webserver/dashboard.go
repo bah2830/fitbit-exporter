@@ -1,10 +1,7 @@
-package exporter
+package webserver
 
 import (
-	"compress/gzip"
 	"encoding/json"
-	"errors"
-	"io"
 	"log"
 	"math"
 	"net/http"
@@ -58,122 +55,71 @@ type zone struct {
 	Calories float64 `json:"calories,omitempty"`
 }
 
-type frontendErr struct {
-	Error string
-}
-
-type gzipResponseWriter struct {
-	io.Writer
-	http.ResponseWriter
-}
-
-func (w gzipResponseWriter) Write(b []byte) (int, error) {
-	return w.Writer.Write(b)
-}
-
-func writeErr(w http.ResponseWriter, statueCode int, err error) {
-	body, _ := json.Marshal(frontendErr{Error: err.Error()})
-	w.WriteHeader(statueCode)
-	w.Write(body)
-}
-
-func (e *Exporter) startFrontend() error {
-	http.HandleFunc("/", gzipHandler(e.indexHandler))
-	http.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {})
-	http.HandleFunc("/login", e.client.LoginHandler)
-	http.HandleFunc("/callback", e.client.CallbackHandler)
-	http.Handle("/assets/", http.StripPrefix("/assets/", http.FileServer(http.Dir("frontend/assets"))))
-
-	log.Println("listening on localhost:3000")
-	go http.ListenAndServe(":3000", nil)
-	return nil
-}
-
-func gzipHandler(fn http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-			fn(w, r)
-			return
-		}
-		w.Header().Set("Content-Encoding", "gzip")
-		w.Header().Set("Content-Type", "text/html")
-		gz := gzip.NewWriter(w)
-		defer gz.Close()
-		gzr := gzipResponseWriter{Writer: gz, ResponseWriter: w}
-		fn(gzr, r)
-	}
-}
-
-func (e *Exporter) indexHandler(w http.ResponseWriter, r *http.Request) {
-	if e.user == nil {
-		writeErr(w, http.StatusForbidden, errors.New("login required"))
-		return
-	}
-
-	top10Hr, err := e.client.GetNHeartRates(true, 10)
+func (s *Server) indexHandler(w http.ResponseWriter, r *http.Request) {
+	top10Hr, err := s.client.GetNHeartRates(true, 10)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	bottom10Hr, err := e.client.GetNHeartRates(false, 10)
+	bottom10Hr, err := s.client.GetNHeartRates(false, 10)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	topResting, err := e.client.GetResting(true)
+	topResting, err := s.client.GetResting(true)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	bottomResting, err := e.client.GetResting(false)
+	bottomResting, err := s.client.GetResting(false)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	currentResting, err := e.client.GetCurrentResting()
+	currentResting, err := s.client.GetCurrentResting()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	currentData, err := e.client.GetCurrentDaysData()
+	currentData, err := s.client.GetCurrentDaysData()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	currentHigh, err := e.client.GetCurrentDayLimit(true)
+	currentHigh, err := s.client.GetCurrentDayLimit(true)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	currentLow, err := e.client.GetCurrentDayLimit(false)
+	currentLow, err := s.client.GetCurrentDayLimit(false)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	currentDayZones, err := e.client.GetCurrentDayZones()
+	currentDayZones, err := s.client.GetCurrentDayZones()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	last7DaysZones, err := e.client.GetZonesByDate(time.Now().Add(-7*24*time.Hour), time.Now())
+	last7DaysZones, err := s.client.GetZonesByDate(time.Now().Add(-7*24*time.Hour), time.Now())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	last30DaysZones, err := e.client.GetZonesByDate(time.Now().Add(-30*24*time.Hour), time.Now())
+	last30DaysZones, err := s.client.GetZonesByDate(time.Now().Add(-30*24*time.Hour), time.Now())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	maxZones, err := e.client.GetMaxZones()
+	maxZones, err := s.client.GetMaxZones()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 
 	data := indexData{
-		BackfillerRunning: e.backfillRunning,
-		BackfillerLastRun: e.backfillLastRun,
+		BackfillerRunning: s.exporter.BackfillRunning,
+		BackfillerLastRun: s.exporter.BackfillLastRun,
 		Last7DaysZones:    zonesToPercentages(last7DaysZones),
 		Last30DaysZones:   zonesToPercentages(last30DaysZones),
 		PersonalRecords: &personalRecords{
@@ -195,18 +141,19 @@ func (e *Exporter) indexHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	templateFuncs := template.FuncMap{
-		"json": func(v interface{}) string {
-			a, _ := json.MarshalIndent(v, "", "  ")
-			return string(a)
-		},
-		"duration": func(in int) time.Duration {
-			return time.Duration(in) * time.Second
-		},
-	}
-
 	tmpl, err := template.New("index.template.html").
-		Funcs(templateFuncs).
+		Funcs(template.FuncMap{
+			"json": func(v interface{}) string {
+				a, err := json.MarshalIndent(v, "", "  ")
+				if err != nil {
+					log.Println("error marshaling json output: " + err.Error())
+				}
+				return string(a)
+			},
+			"duration": func(in int) time.Duration {
+				return time.Duration(in) * time.Second
+			},
+		}).
 		ParseFiles("frontend/templates/index.template.html")
 
 	if err != nil {
@@ -242,6 +189,9 @@ func zonesToPercentages(inZones []fitbit.HeartRateZone) *zones {
 	}
 
 	var percent = func(input int) float64 {
+		if total == 0 {
+			return 0.0
+		}
 		return math.Round(float64(input) / float64(total) * 100.0)
 	}
 

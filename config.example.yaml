@@ -1,3 +1,7 @@
+webFrontend:
+  listen: :3000
+  sessionKey: random-32-char-string-for-aes256
+
 fitbit:
   clientId: 12AB3C
   clientSecret: place-client-secret-for-app-here

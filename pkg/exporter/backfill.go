@@ -15,7 +15,6 @@ const fitbitCallsPerHour = 250
 
 func (e *Exporter) backfill() error {
 	log.Print("Starting fitbit data backfill...")
-	startTime := time.Now()
 
 	// If backfill start not set a backfill will not be performed
 	if e.cfg.Fitbit.BackfillStart == "" {
@@ -52,9 +51,10 @@ func (e *Exporter) backfill() error {
 	days := total.Hours() / 24.0
 
 	// With 250 api calls per hour and 1 api call per day get the total time required to make all calls
-	apiCallHours := days / float64(fitbitCallsPerHour)
+	backfillETA := time.Duration(int64(days/float64(fitbitCallsPerHour))*60) * time.Minute
 
-	log.Printf("Backfill requires %.0f api calls with an ETA of %.2f hrs", days, apiCallHours)
+	log.Printf("Backfill requires %.0f api calls with an ETA of %s", days, backfillETA.String())
+	startTime := time.Now()
 
 	// Loop through every day from the start date up until today.
 	// Because of rate limits on the fitbit api we have to check for the too many calls response
