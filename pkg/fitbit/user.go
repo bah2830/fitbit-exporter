@@ -1,5 +1,7 @@
 package fitbit
 
+import "net/http"
+
 type UserResponse struct {
 	User *User `json:"user"`
 }
@@ -11,10 +13,10 @@ type User struct {
 	MemberSince string `json:"memberSince"`
 }
 
-func (c *Client) GetCurrentUser() (*User, error) {
-	user := &UserResponse{}
-	if err := c.get(basePath+"/user/-/profile.json", user); err != nil {
+func (c *Client) GetCurrentUser(client *http.Client) (*User, error) {
+	userResp := &UserResponse{}
+	if err := c.get(client, basePath+"/user/-/profile.json", userResp); err != nil {
 		return nil, err
 	}
-	return user.User, nil
+	return userResp.User, nil
 }

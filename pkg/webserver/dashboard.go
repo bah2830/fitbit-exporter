@@ -2,6 +2,8 @@ package webserver
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"math"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bah2830/fitbit-exporter/pkg/fitbit"
+	"github.com/gorilla/mux"
 )
 
 type indexData struct {
@@ -55,65 +58,71 @@ type zone struct {
 	Calories float64 `json:"calories,omitempty"`
 }
 
-func (s *Server) indexHandler(w http.ResponseWriter, r *http.Request) {
-	top10Hr, err := s.client.GetNHeartRates(true, 10)
+func (s *Server) userHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	user, ok := vars["user"]
+	if !ok || user == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("user not given"))
+	}
+
+	top10Hr, err := s.client.GetNHeartRates(user, true, 10)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("GetNHeartRates: "+err.Error()))
 		return
 	}
-	bottom10Hr, err := s.client.GetNHeartRates(false, 10)
+	bottom10Hr, err := s.client.GetNHeartRates(user, false, 10)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("GetNHeartRates: "+err.Error()))
 		return
 	}
-	topResting, err := s.client.GetResting(true)
+	topResting, err := s.client.GetResting(user, true)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("GetResting: "+err.Error()))
 		return
 	}
-	bottomResting, err := s.client.GetResting(false)
+	bottomResting, err := s.client.GetResting(user, false)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("GetResting: "+err.Error()))
 		return
 	}
-	currentResting, err := s.client.GetCurrentResting()
+	currentResting, err := s.client.GetCurrentResting(user)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("GetCurrentResting: "+err.Error()))
 		return
 	}
-	currentData, err := s.client.GetCurrentDaysData()
+	currentData, err := s.client.GetCurrentDaysData(user)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("GetCurrentDaysData: "+err.Error()))
 		return
 	}
-	currentHigh, err := s.client.GetCurrentDayLimit(true)
+	currentHigh, err := s.client.GetCurrentDayLimit(user, true)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("GetCurrentDayLimit: "+err.Error()))
 		return
 	}
-	currentLow, err := s.client.GetCurrentDayLimit(false)
+	currentLow, err := s.client.GetCurrentDayLimit(user, false)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("GetCurrentDayLimit: "+err.Error()))
 		return
 	}
-	currentDayZones, err := s.client.GetCurrentDayZones()
+	currentDayZones, err := s.client.GetCurrentDayZones(user)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("GetCurrentDayZones: "+err.Error()))
 		return
 	}
-	last7DaysZones, err := s.client.GetZonesByDate(time.Now().Add(-7*24*time.Hour), time.Now())
+	last7DaysZones, err := s.client.GetZonesByDate(user, time.Now().Add(-7*24*time.Hour), time.Now())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("GetZonesByDate: "+err.Error()))
 		return
 	}
-	last30DaysZones, err := s.client.GetZonesByDate(time.Now().Add(-30*24*time.Hour), time.Now())
+	last30DaysZones, err := s.client.GetZonesByDate(user, time.Now().Add(-30*24*time.Hour), time.Now())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("GetZonesByDate: "+err.Error()))
 		return
 	}
-	maxZones, err := s.client.GetMaxZones()
+	maxZones, err := s.client.GetMaxZones(user)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("GetMaxZones: "+err.Error()))
 		return
 	}
 
@@ -141,7 +150,7 @@ func (s *Server) indexHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	tmpl, err := template.New("index.template.html").
+	tmpl, err := template.New("user.template.html").
 		Funcs(template.FuncMap{
 			"json": func(v interface{}) string {
 				a, err := json.MarshalIndent(v, "", "  ")
@@ -154,7 +163,7 @@ func (s *Server) indexHandler(w http.ResponseWriter, r *http.Request) {
 				return time.Duration(in) * time.Second
 			},
 		}).
-		ParseFiles("frontend/templates/index.template.html")
+		ParseFiles("frontend/templates/user.template.html")
 
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)

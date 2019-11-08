@@ -15,6 +15,7 @@ const fitbitCallsPerHour = 250
 
 func (e *Exporter) backfill() error {
 	log.Print("Starting fitbit data backfill...")
+	startTime := time.Now()
 
 	// If backfill start not set a backfill will not be performed
 	if e.cfg.Fitbit.BackfillStart == "" {
@@ -26,49 +27,53 @@ func (e *Exporter) backfill() error {
 		return err
 	}
 
-	// Get the most current date from the database
-	var date string
-	if err := e.db.GetDB().QueryRow("select date from heart_rest order by date DESC").Scan(&date); err != nil {
-		if err != sql.ErrNoRows {
-			return err
+	users := e.client.GetUsers()
+	for _, userClient := range users {
+		user := userClient.ID
+
+		// Get the most current date from the database
+		var date string
+		if err := e.db.GetDB().QueryRow("select date from heart_rest where user = ? order by date DESC", user).Scan(&date); err != nil {
+			if err != sql.ErrNoRows {
+				return err
+			}
 		}
-	}
-	if date != "" {
-		lastDate, err := time.Parse(dateTimeFormat, date)
-		if err != nil {
-			return err
+		if date != "" {
+			lastDate, err := time.Parse(dateTimeFormat, date)
+			if err != nil {
+				return err
+			}
+
+			// Get the latest date from the backfill start and the last date in the database
+			if lastDate.After(startDate) {
+				startDate = lastDate
+			}
 		}
 
-		// Get the latest date from the backfill start and the last date in the database
-		if lastDate.After(startDate) {
-			startDate = lastDate
-		}
-	}
+		log.Printf("Starting backfill for %s from %s", user, startDate.Format(dateFormat))
 
-	log.Printf("Starting backfill from %s", startDate.Format(dateFormat))
+		total := time.Since(startDate)
+		days := total.Hours() / 24.0
 
-	total := time.Since(startDate)
-	days := total.Hours() / 24.0
+		// With 250 api calls per hour and 1 api call per day get the total time required to make all calls
+		backfillETA := time.Duration(int64(days/float64(fitbitCallsPerHour))*60) * time.Minute
 
-	// With 250 api calls per hour and 1 api call per day get the total time required to make all calls
-	backfillETA := time.Duration(int64(days/float64(fitbitCallsPerHour))*60) * time.Minute
+		log.Printf("Backfill requires %.0f api calls with an ETA of %s", days, backfillETA.String())
 
-	log.Printf("Backfill requires %.0f api calls with an ETA of %s", days, backfillETA.String())
-	startTime := time.Now()
+		// Loop through every day from the start date up until today.
+		// Because of rate limits on the fitbit api we have to check for the too many calls response
+		// When too many calls is hit we wait until the next hour mark for it reset and continue
+		for date := startDate; !date.After(time.Now().UTC()); date = date.Add(24 * time.Hour) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Hour)
+			d, err := e.getHeartData(ctx, user, date)
+			if err != nil {
+				return err
+			}
+			cancel()
 
-	// Loop through every day from the start date up until today.
-	// Because of rate limits on the fitbit api we have to check for the too many calls response
-	// When too many calls is hit we wait until the next hour mark for it reset and continue
-	for date := startDate; !date.After(time.Now().UTC()); date = date.Add(24 * time.Hour) {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Hour)
-		d, err := e.getHeartData(ctx, date)
-		if err != nil {
-			return err
-		}
-		cancel()
-
-		if err := e.client.SaveHeartRateData(d); err != nil {
-			return err
+			if err := e.client.SaveHeartRateData(user, d); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -78,13 +83,13 @@ func (e *Exporter) backfill() error {
 
 // getHeartData will attempt to get the heart rate data from the api
 // repeatidly until it no longer has a rate limit error or the timeout occurs
-func (e *Exporter) getHeartData(ctx context.Context, date time.Time) (*fitbit.HeartRateData, error) {
+func (e *Exporter) getHeartData(ctx context.Context, user string, date time.Time) (*fitbit.HeartRateData, error) {
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, fmt.Errorf("timeout waiting to get api data")
 		default:
-			d, err := e.client.GetHeartData(fitbit.HeartRateOptions{
+			d, err := e.client.GetHeartData(user, fitbit.HeartRateOptions{
 				StartDate:   &date,
 				EndDate:     &date,
 				DetailLevel: fitbit.GetHeartRateDetailLevel(fitbit.HeartRateDetailLevel1Min),

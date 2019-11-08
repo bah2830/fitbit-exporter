@@ -1,7 +1,6 @@
 package fitbit
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -28,14 +27,19 @@ var requiredScopes = []string{
 }
 
 type Client struct {
+	users        []*UserClient
+	oauthConfig  *oauth2.Config
+	clientID     string
+	clientSecret string
+	db           *database.Database
+}
+
+type UserClient struct {
+	ID            string
+	Name          string
 	httpClient    *http.Client
 	token         *oauth2.Token
-	oauthConfig   *oauth2.Config
-	clientID      string
-	clientSecret  string
-	db            *database.Database
-	authenticated *sync.WaitGroup
-	authComplete  bool
+	Authenticated *sync.WaitGroup
 }
 
 type RequestError struct {
@@ -62,14 +66,14 @@ func (e *RequestError) string() string {
 
 func NewClient(db *database.Database, clientID, clientSecret string) (*Client, error) {
 	client := &Client{
-		clientID:      clientID,
-		clientSecret:  clientSecret,
-		authenticated: &sync.WaitGroup{},
-		db:            db,
+		clientID:     clientID,
+		clientSecret: clientSecret,
+		db:           db,
+		users:        make([]*UserClient, 0),
+		oauthConfig:  defaultOauthConfig(clientID, clientSecret),
 	}
 
 	// Set a wait on the authenticated check
-	client.authenticated.Add(1)
 	if err := client.setupAuth(); err != nil {
 		return nil, err
 	}
@@ -87,22 +91,31 @@ func defaultOauthConfig(clientID, clientSecret string) *oauth2.Config {
 	}
 }
 
-func (c *Client) setupAuth() error {
-	c.oauthConfig = defaultOauthConfig(c.clientID, c.clientSecret)
+func (c *Client) GetUser(userID string) (*UserClient, error) {
+	for _, u := range c.users {
+		if u.ID == userID {
+			return u, nil
+		}
+	}
 
-	token, err := c.getPreviousToken()
+	return nil, fmt.Errorf("user %s does not exist", userID)
+}
+
+func (c *Client) GetUsers() []*UserClient {
+	var users []*UserClient
+	for _, user := range c.users {
+		users = append(users, user)
+	}
+	return users
+}
+
+func (c *Client) setupAuth() error {
+	tokens, err := c.getPreviousTokens()
 	if err != nil {
 		return err
 	}
 
-	// If a previous token was found and it hasn't expired then use it rather than wait for auth
-	if token != nil {
-		c.token = token
-		c.httpClient = c.oauthConfig.Client(oauth2.NoContext, c.token)
-		c.authenticated.Done()
-		c.authComplete = true
-	}
-
+	c.users = tokens
 	return nil
 }
 
@@ -112,118 +125,133 @@ func (c *Client) LoginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Client) CallbackHandler(w http.ResponseWriter, r *http.Request) {
-	if c.token == nil {
-		code := r.FormValue("code")
+	code := r.FormValue("code")
 
-		var err error
-		c.token, err = c.oauthConfig.Exchange(oauth2.NoContext, code)
-		if err != nil {
-			// If err getting a token then redirect to the root path to get a valid login token
-			http.Redirect(w, r, listenURL, http.StatusTemporaryRedirect)
-			return
-		}
-
-		// Setup the http client
-		c.httpClient = defaultOauthConfig(c.clientID, c.clientSecret).Client(oauth2.NoContext, c.token)
-		c.authenticated.Done()
-		c.authComplete = true
-		if err := c.saveToken(); err != nil {
-			w.Write([]byte(err.Error()))
-			return
-		}
-	}
-
-	http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
-}
-
-func (c *Client) IsAuthenticated() bool {
-	return c.authComplete
-}
-
-func (c *Client) WaitForAuth() {
-	if c.token != nil {
+	token, err := c.oauthConfig.Exchange(oauth2.NoContext, code)
+	if err != nil {
+		// If err getting a token then redirect to the root path to get a valid login token
+		http.Redirect(w, r, listenURL, http.StatusTemporaryRedirect)
 		return
 	}
 
-	fmt.Printf("Waiting for authentication to complete (%s)..\n", listenURL)
-	c.authenticated.Wait()
+	httpClient := c.oauthConfig.Client(oauth2.NoContext, token)
+	user, err := c.GetCurrentUser(httpClient)
+	if err != nil {
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	c.users = append(c.users, &UserClient{
+		ID:            user.ID,
+		Name:          user.FullName,
+		token:         token,
+		httpClient:    httpClient,
+		Authenticated: &sync.WaitGroup{},
+	})
+
+	if err := c.saveTokens(); err != nil {
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	http.Redirect(w, r, "/"+user.ID, http.StatusTemporaryRedirect)
 }
 
-func (c *Client) getPreviousToken() (*oauth2.Token, error) {
-	var accessToken, refreshToken, tokenType, expiration string
-	err := c.db.GetDB().
-		QueryRow("select access_token, refresh_token, token_type, expiration from token").
-		Scan(&accessToken, &refreshToken, &tokenType, &expiration)
+func (c *Client) getPreviousTokens() ([]*UserClient, error) {
+	rows, err := c.db.GetDB().Query("select user_id, user, access_token, refresh_token, token_type, expiration from token")
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
+		return nil, err
+	}
+
+	tokens := make([]*UserClient, 0)
+	for rows.Next() {
+		var userID, user, accessToken, refreshToken, tokenType, expiration string
+		if err := rows.Scan(&userID, &user, &accessToken, &refreshToken, &tokenType, &expiration); err != nil {
+			return nil, err
 		}
-		return nil, err
+
+		expiry, err := time.Parse(database.DateTimeFormat, expiration)
+		if err != nil {
+			return nil, err
+		}
+
+		token := &oauth2.Token{
+			AccessToken:  accessToken,
+			RefreshToken: refreshToken,
+			TokenType:    tokenType,
+			Expiry:       expiry,
+		}
+
+		// If a previous token was found and it hasn't expired then use it rather than wait for auth
+		tokens = append(tokens, &UserClient{
+			ID:            userID,
+			Name:          user,
+			token:         token,
+			httpClient:    c.oauthConfig.Client(oauth2.NoContext, token),
+			Authenticated: &sync.WaitGroup{},
+		})
 	}
 
-	expiry, err := time.Parse(database.DateTimeFormat, expiration)
-	if err != nil {
-		return nil, err
-	}
-
-	token := &oauth2.Token{
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		TokenType:    tokenType,
-		Expiry:       expiry,
-	}
-
-	return token, nil
+	return tokens, nil
 }
 
-func (c *Client) saveToken() error {
-	if c.token == nil {
-		return nil
+func (c *Client) saveTokens() error {
+	for _, userClient := range c.users {
+		if err := c.saveToken(userClient); err != nil {
+			return err
+		}
 	}
+	return nil
+}
 
-	// Delete all previos tokens
-	if _, err := c.db.GetDB().Exec("delete from token"); err != nil {
+func (c *Client) saveToken(user *UserClient) error {
+	// Delete all previous tokens for the user
+	if _, err := c.db.GetDB().Exec("delete from token where user = ?", user.ID); err != nil {
 		return err
 	}
 
 	insertStatement := `insert into token
-		(access_token, refresh_token, token_type, expiration)
-		values (?, ?, ?, ?)`
+	(user_id, user, access_token, refresh_token, token_type, expiration)
+	values (?, ?, ?, ?, ?)`
 
 	_, err := c.db.GetDB().Exec(
 		insertStatement,
-		c.token.AccessToken,
-		c.token.RefreshToken,
-		c.token.TokenType,
-		c.token.Expiry.Format(database.DateTimeFormat),
+		user.ID,
+		user.Name,
+		user.token.AccessToken,
+		user.token.RefreshToken,
+		user.token.TokenType,
+		user.token.Expiry.Format(database.DateTimeFormat),
 	)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
 func (c *Client) Close() error {
-	defer c.httpClient.CloseIdleConnections()
+	defer func() {
+		for _, u := range c.users {
+			u.httpClient.CloseIdleConnections()
+		}
+	}()
 
-	// Get the current token and save it. This will help prevent a refreshed token from being missed
-	oauthTransport, ok := c.httpClient.Transport.(*oauth2.Transport)
-	if !ok {
-		return nil
+	for _, user := range c.users {
+		// Get the current token and save it. This will help prevent a refreshed token from being missed
+		oauthTransport, ok := user.httpClient.Transport.(*oauth2.Transport)
+		if !ok {
+			return nil
+		}
+
+		token, err := oauthTransport.Source.Token()
+		if err != nil {
+			return err
+		}
+
+		user.token = token
 	}
-
-	token, err := oauthTransport.Source.Token()
-	if err != nil {
-		return err
-	}
-
-	c.token = token
-	return c.saveToken()
+	return c.saveTokens()
 }
 
-func (c *Client) get(path string, output interface{}) error {
-	resp, err := c.httpClient.Get(path)
+func (c *Client) get(client *http.Client, path string, output interface{}) error {
+	resp, err := client.Get(path)
 	if err != nil {
 		return err
 	}

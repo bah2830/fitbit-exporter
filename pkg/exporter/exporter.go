@@ -30,16 +30,13 @@ func New(cfg *config.Config, client *fitbit.Client, db *database.Database) *Expo
 }
 
 func (e *Exporter) Start() error {
-	// Wait for auth to occur before continuing
-	e.client.WaitForAuth()
-
-	if err := e.startBackfiller(); err != nil {
+	if err := e.runBackfiller(); err != nil {
 		return err
 	}
 
 	// Run a backfill every hour to keep the most up to date data
 	for range time.After(1 * time.Hour) {
-		if err := e.startBackfiller(); err != nil {
+		if err := e.runBackfiller(); err != nil {
 			return err
 		}
 	}
@@ -51,7 +48,7 @@ func (e *Exporter) Stop() error {
 	return e.client.Close()
 }
 
-func (e *Exporter) startBackfiller() error {
+func (e *Exporter) runBackfiller() error {
 	defer func() {
 		e.BackfillRunning = false
 	}()

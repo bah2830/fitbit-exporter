@@ -1,6 +1,8 @@
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS token (
+    user_id         VARCHAR(150) PRIMARY KEY,
+    user            VARCHAR(150) NOT NULL,
     access_token    TEXT NOT NULL,
     token_type      TEXT NOT NULL,
     refresh_token   TEXT NOT NULL,
@@ -8,22 +10,29 @@ CREATE TABLE IF NOT EXISTS token (
 );
 
 CREATE TABLE IF NOT EXISTS heart_data (
-    date    DATETIME PRIMARY KEY,
-    value   INT NOT NULL
+    user    VARCHAR(150) NOT NULL,
+    date    DATETIME NOT NULL,
+    value   INT NOT NULL,
+
+    PRIMARY KEY (user, date)
 );
 
 CREATE TABLE IF NOT EXISTS heart_rest (
-    date    DATETIME PRIMARY KEY,
-    value   INT NOT NULL
+    user    VARCHAR(150) NOT NULL,
+    date    DATETIME NOT NULL,
+    value   INT NOT NULL,
+
+    PRIMARY KEY (user, date)
 );
 
 CREATE TABLE IF NOT EXISTS heart_zone (
+    user        VARCHAR(150) NOT NULL,
     date        DATETIME NOT NULL,
     type        VARCHAR(150) NOT NULL,
     minutes     INT NOT NULL,
     calories    INT NOT NULL,
 
-    PRIMARY KEY (date, type)
+    PRIMARY KEY (user, date, type)
 );
 
 CREATE INDEX heart_data_value ON heart_data (value);

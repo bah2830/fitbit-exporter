@@ -1,13 +1,14 @@
 package fitbit
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
 )
 
 const (
-	heartRatePath = "/user/-/activities/heart/date"
+	heartRatePath = "/user/%s/activities/heart/date"
 
 	HeartRateDetailLevel1Sec HeartRateDetailLevel = "1sec"
 	HeartRateDetailLevel1Min HeartRateDetailLevel = "1min"
@@ -57,22 +58,27 @@ type HeartData struct {
 	Value int    `json:"value"`
 }
 
-func (c *Client) GetHeartData(opts HeartRateOptions) (*HeartRateData, error) {
-	path, err := opts.toPath()
+func (c *Client) GetHeartData(user string, opts HeartRateOptions) (*HeartRateData, error) {
+	path, err := opts.toPath(user)
+	if err != nil {
+		return nil, err
+	}
+
+	userClient, err := c.GetUser(user)
 	if err != nil {
 		return nil, err
 	}
 
 	data := &HeartRateData{}
-	if err := c.get(path, data); err != nil {
+	if err := c.get(userClient.httpClient, path, data); err != nil {
 		return nil, err
 	}
 
 	return data, nil
 }
 
-func (o HeartRateOptions) toPath() (string, error) {
-	path := basePath + heartRatePath
+func (o HeartRateOptions) toPath(user string) (string, error) {
+	path := basePath + fmt.Sprintf(heartRatePath, user)
 
 	if o.StartDate == nil {
 		path += "/today"
@@ -108,7 +114,7 @@ func GetHeartRatePeriod(period HeartRatePeriod) *HeartRatePeriod {
 	return &period
 }
 
-func (c *Client) SaveHeartRateData(data *HeartRateData) error {
+func (c *Client) SaveHeartRateData(user string, data *HeartRateData) error {
 	db := c.db.GetDB()
 
 	var day string
@@ -117,12 +123,13 @@ func (c *Client) SaveHeartRateData(data *HeartRateData) error {
 
 		// Save the resting heart rate if it hasn't been already
 		var count int
-		if err := db.QueryRow("select count(*) from heart_rest where date = ?", day).Scan(&count); err != nil {
+		if err := db.QueryRow("select count(*) from heart_rest where user = ? and date = ?", user, day).Scan(&count); err != nil {
 			return err
 		}
 		if count == 0 && dayOverview.Value.RestingHeartRate != 0 {
 			_, err := db.Exec(
-				"insert into heart_rest (date, value) values (?, ?)",
+				"insert into heart_rest (user, date, value) values (?, ?, ?)",
+				user,
 				day,
 				dayOverview.Value.RestingHeartRate,
 			)
@@ -135,7 +142,8 @@ func (c *Client) SaveHeartRateData(data *HeartRateData) error {
 		for _, zone := range dayOverview.Value.Zones {
 			var count int
 			r := db.QueryRow(
-				"select count(*) from heart_zone where date = ? and type = ?",
+				"select count(*) from heart_zone where user = ? and date = ? and type = ?",
+				user,
 				day,
 				zone.Name,
 			)
@@ -144,7 +152,8 @@ func (c *Client) SaveHeartRateData(data *HeartRateData) error {
 			}
 			if count == 0 {
 				_, err := db.Exec(
-					"insert into heart_zone (date, type, minutes, calories) values (?, ?, ?, ?)",
+					"insert into heart_zone (user, date, type, minutes, calories) values (?, ?, ?, ?, ?)",
+					user,
 					day,
 					zone.Name,
 					zone.Minutes,
@@ -159,7 +168,12 @@ func (c *Client) SaveHeartRateData(data *HeartRateData) error {
 
 	// Get list of every existing datapoint on this day
 	existingDates := make([]string, 0, 2000)
-	rows, err := db.Query("select date from heart_data where date between ? and ?", day+" 00:00:00", day+" 23:59:59")
+	rows, err := db.Query(
+		"select date from heart_data where user = ? and date between ? and ?",
+		user,
+		day+" 00:00:00",
+		day+" 23:59:59",
+	)
 	if err != nil {
 		return err
 	}
@@ -188,7 +202,7 @@ INTRA_LOOP:
 			}
 		}
 
-		currentChunk = append(currentChunk, fmt.Sprintf("('%s', %d)", day+" "+d.Time, d.Value))
+		currentChunk = append(currentChunk, fmt.Sprintf("('%s', '%s', %d)", user, day+" "+d.Time, d.Value))
 		if i != 0 && i%200 == 0 {
 			intradayChunks = append(intradayChunks, currentChunk)
 			currentChunk = make([]string, 0, 200)
@@ -199,7 +213,7 @@ INTRA_LOOP:
 	}
 
 	// Insert 200 data points at a time to help take load off the database connection
-	insertQuery := "insert into heart_data (date, value) values "
+	insertQuery := "insert into heart_data (user, date, value) values "
 	for _, chunk := range intradayChunks {
 		if _, err := db.Exec(insertQuery + strings.Join(chunk, ", ")); err != nil {
 			return err
@@ -209,7 +223,7 @@ INTRA_LOOP:
 	return nil
 }
 
-func (c *Client) GetNHeartRates(top bool, limit int) ([]HeartData, error) {
+func (c *Client) GetNHeartRates(user string, top bool, limit int) ([]HeartData, error) {
 	order := "DESC"
 	agg := "max"
 	if !top {
@@ -222,10 +236,12 @@ func (c *Client) GetNHeartRates(top bool, limit int) ([]HeartData, error) {
 			date,
 			%s(value) as value
 		from heart_data
+		where user = '%s'
 		group by DATE_FORMAT(date, '%%Y-%%m-%%d')
 		order by %s(value) %s
 		limit %d`,
 		agg,
+		user,
 		agg,
 		order,
 		limit,
@@ -253,7 +269,7 @@ func (c *Client) GetNHeartRates(top bool, limit int) ([]HeartData, error) {
 	return results, nil
 }
 
-func (c *Client) GetResting(top bool) (*HeartData, error) {
+func (c *Client) GetResting(user string, top bool) (*HeartData, error) {
 	order := "DESC"
 	if !top {
 		order = "ASC"
@@ -261,8 +277,11 @@ func (c *Client) GetResting(top bool) (*HeartData, error) {
 
 	var date string
 	var value int
-	query := fmt.Sprintf("select DATE_FORMAT(date, '%%Y-%%m-%%d'), value from heart_rest order by value %s", order)
+	query := fmt.Sprintf("select DATE_FORMAT(date, '%%Y-%%m-%%d'), value from heart_rest where user = '%s' order by value %s", user, order)
 	if err := c.db.GetDB().QueryRow(query).Scan(&date, &value); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
 		return nil, err
 	}
 
@@ -272,19 +291,22 @@ func (c *Client) GetResting(top bool) (*HeartData, error) {
 	}, nil
 }
 
-func (c *Client) GetCurrentResting() (int, error) {
+func (c *Client) GetCurrentResting(user string) (int, error) {
 	var value int
-	query := "select value from heart_rest where date_format(date, '%Y-%m-%d') = date_format(now(), '%Y-%m-%d')"
-	if err := c.db.GetDB().QueryRow(query).Scan(&value); err != nil {
+	query := "select value from heart_rest where user = ? and date_format(date, '%Y-%m-%d') = date_format(now(), '%Y-%m-%d')"
+	if err := c.db.GetDB().QueryRow(query, user).Scan(&value, user); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
 		return 0, err
 	}
 
 	return value, nil
 }
 
-func (c *Client) GetCurrentDaysData() ([]HeartData, error) {
-	query := "select date, value from heart_data where date_format(date, '%Y-%m-%d') = date_format(now(), '%Y-%m-%d')"
-	rows, err := c.db.GetDB().Query(query)
+func (c *Client) GetCurrentDaysData(user string) ([]HeartData, error) {
+	query := "select date, value from heart_data where user = ? and date_format(date, '%Y-%m-%d') = date_format(now(), '%Y-%m-%d')"
+	rows, err := c.db.GetDB().Query(query, user)
 	if err != nil {
 		return nil, err
 	}
@@ -305,20 +327,24 @@ func (c *Client) GetCurrentDaysData() ([]HeartData, error) {
 	return results, nil
 }
 
-func (c *Client) GetCurrentDayLimit(top bool) (*HeartData, error) {
+func (c *Client) GetCurrentDayLimit(user string, top bool) (*HeartData, error) {
 	order := "DESC"
 	if !top {
 		order = "ASC"
 	}
 
 	query := fmt.Sprintf(
-		"select date, value from heart_data where date_format(date, '%%Y-%%m-%%d') = date_format(now(), '%%Y-%%m-%%d') order by value %s",
+		"select date, value from heart_data where user = '%s' and date_format(date, '%%Y-%%m-%%d') = date_format(now(), '%%Y-%%m-%%d') order by value %s",
+		user,
 		order,
 	)
 
 	var date string
 	var value int
 	if err := c.db.GetDB().QueryRow(query).Scan(&date, &value); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
 		return nil, err
 	}
 
@@ -328,16 +354,17 @@ func (c *Client) GetCurrentDayLimit(top bool) (*HeartData, error) {
 	}, nil
 }
 
-func (c *Client) GetCurrentDayZones() ([]HeartRateZone, error) {
+func (c *Client) GetCurrentDayZones(user string) ([]HeartRateZone, error) {
 	query := `select
 		type,
 		minutes,
 		calories
 	from heart_zone
 	where
-		date_format(date, '%Y-%m-%d') = date_format(now(), '%Y-%m-%d')`
+		user = ?
+	and date_format(date, '%Y-%m-%d') = date_format(now(), '%Y-%m-%d')`
 
-	rows, err := c.db.GetDB().Query(query)
+	rows, err := c.db.GetDB().Query(query, user)
 	if err != nil {
 		return nil, err
 	}
@@ -360,17 +387,18 @@ func (c *Client) GetCurrentDayZones() ([]HeartRateZone, error) {
 	return results, nil
 }
 
-func (c *Client) GetZonesByDate(startDate, endDate time.Time) ([]HeartRateZone, error) {
+func (c *Client) GetZonesByDate(user string, startDate, endDate time.Time) ([]HeartRateZone, error) {
 	query := `select
 		type,
 		minutes,
 		calories
 	from heart_zone
 	where
-		date between ? and ?
+		user = ?
+	and date between ? and ?
 	order by date, type`
 
-	rows, err := c.db.GetDB().Query(query, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+	rows, err := c.db.GetDB().Query(query, user, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +421,7 @@ func (c *Client) GetZonesByDate(startDate, endDate time.Time) ([]HeartRateZone, 
 	return results, nil
 }
 
-func (c *Client) GetMaxZones() (map[string]HeartRateZone, error) {
+func (c *Client) GetMaxZones(user string) (map[string]HeartRateZone, error) {
 	query := `select
 		date,
 		type,
@@ -401,15 +429,17 @@ func (c *Client) GetMaxZones() (map[string]HeartRateZone, error) {
 		calories
 	from heart_zone
 	where
-		(type, minutes) in (
+		(user, type, minutes) in (
 			select
+				user,
 				type,
 				max(minutes)
 			from heart_zone
+			where user = ?
 			group by type
 		)`
 
-	rows, err := c.db.GetDB().Query(query)
+	rows, err := c.db.GetDB().Query(query, user)
 	if err != nil {
 		return nil, err
 	}
