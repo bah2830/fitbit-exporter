@@ -17,64 +17,66 @@ func (e *Exporter) backfill() error {
 	log.Print("Starting fitbit data backfill...")
 	startTime := time.Now()
 
-	// If backfill start not set a backfill will not be performed
-	if e.cfg.Fitbit.BackfillStart == "" {
-		return nil
-	}
+	for _, user := range e.client.Users {
+		startDate := time.Now()
 
-	startDate, err := time.Parse(dateFormat, e.cfg.Fitbit.BackfillStart)
-	if err != nil {
-		return err
-	}
-
-	users := e.client.GetUsers()
-	for _, userClient := range users {
-		user := userClient.ID
-
-		// Get the most current date from the database
+		// Get the earliest date from the database
 		var date string
-		if err := e.db.GetDB().QueryRow("select date from heart_rest where user = ? order by date DESC", user).Scan(&date); err != nil {
+		if err := e.db.GetDB().QueryRow("select date from heart_rest where user_id = ? order by date ASC", user.ID).Scan(&date); err != nil {
 			if err != sql.ErrNoRows {
 				return err
 			}
 		}
 		if date != "" {
-			lastDate, err := time.Parse(dateTimeFormat, date)
+			earliestDate, err := time.Parse(dateTimeFormat, date)
 			if err != nil {
 				return err
 			}
 
-			// Get the latest date from the backfill start and the last date in the database
-			if lastDate.After(startDate) {
-				startDate = lastDate
+			if earliestDate.Before(startDate) {
+				startDate = earliestDate
 			}
 		}
 
-		log.Printf("Starting backfill for %s from %s", user, startDate.Format(dateFormat))
+		log.Printf("Starting backfill for %s from %s", user.FullName, startDate.Format(dateFormat))
 
-		total := time.Since(startDate)
-		days := total.Hours() / 24.0
+		// After 2 days of no data consider the backfill complete
+		var daysWithoutData int
 
-		// With 250 api calls per hour and 1 api call per day get the total time required to make all calls
-		backfillETA := time.Duration(int64(days/float64(fitbitCallsPerHour))*60) * time.Minute
-
-		log.Printf("Backfill requires %.0f api calls with an ETA of %s", days, backfillETA.String())
-
-		// Loop through every day from the start date up until today.
+		// Loop through every day from the earliest date up until no more data is returned
 		// Because of rate limits on the fitbit api we have to check for the too many calls response
 		// When too many calls is hit we wait until the next hour mark for it reset and continue
-		for date := startDate; !date.After(time.Now().UTC()); date = date.Add(24 * time.Hour) {
+		for {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Hour)
-			d, err := e.getHeartData(ctx, user, date)
+			defer cancel()
+			d, err := e.getHeartData(ctx, user.ID, startDate)
 			if err != nil {
 				return err
 			}
-			cancel()
 
-			if err := e.client.SaveHeartRateData(user, d); err != nil {
+			// If no intraday data found then we've hit the end of data available
+			if (d.IntraDay == nil || len(d.IntraDay.Data) == 0) && len(d.OverviewByDay) == 0 {
+				daysWithoutData++
+				if daysWithoutData >= 2 {
+					break
+				}
+
+			}
+
+			if err := user.SaveHeartRateData(e.db.GetDB(), d); err != nil {
 				return err
 			}
+
+			// Go back one day
+			startDate = startDate.Add(-24 * time.Hour)
 		}
+
+		log.Printf(
+			"Backfill completed for %s at %s... completed in %s",
+			user.FullName,
+			startDate.Format(dateFormat),
+			time.Since(startTime).String(),
+		)
 	}
 
 	log.Printf("Backfill completed... completed in %s", time.Since(startTime).String())
@@ -100,7 +102,8 @@ func (e *Exporter) getHeartData(ctx context.Context, user string, date time.Time
 					if requestErr.Code == http.StatusTooManyRequests {
 						retryTime := time.Now().Add(requestErr.RetryAfter)
 						log.Printf(
-							"Rate limit hit, waiting %s and trying again (%s)",
+							"Rate limit hit while at %s, waiting %s and trying again (%s)",
+							date.Format(dateFormat),
 							requestErr.RetryAfter.String(),
 							retryTime.Format(dateTimeFormat),
 						)

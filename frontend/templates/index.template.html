@@ -4,5 +4,10 @@
     </head>
     <body>
         <a href="/login">Login to Fitbit</a>
+        <br><hr><br>
+        {{ range $user := . }}
+            <a href="/{{ .ID }}">{{ .FullName }}</a>
+            <br>
+        {{ end }}
     </body>
 </html>

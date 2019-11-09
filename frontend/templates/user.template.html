@@ -3,7 +3,31 @@
         <title>Fitbit Data</title>
     </head>
     <body>
-        <a href="/login">Login to Fitbit</a>
+        <table>
+            <tr><th colspan="3" align="left">Heart Rate</th></tr>
+            <tr>
+                <td>min</td>
+                <td>{{ with index .PersonalRecords.Bottom10HeartRates 0 }}{{ .Value }}{{ end }}</td>
+                <td>{{ with index .PersonalRecords.Bottom10HeartRates 0 }}{{ .Time }}{{ end }}</td>
+            </tr>
+            <tr>
+                <td>max</td>
+                <td>{{ with index .PersonalRecords.Top10HeartRates 0 }}{{ .Value }}{{ end }}</td>
+                <td>{{ with index .PersonalRecords.Top10HeartRates 0 }}{{ .Time }}{{ end }}</td>
+            </tr>
+            <tr><th colspan="3">&nbsp;</th></tr>
+            <tr><th colspan="3" align="left">Resting</th></tr>
+            <tr>
+                <td>min</td>
+                <td>{{ .PersonalRecords.MinResting.Value }}</td>
+                <td>{{ .PersonalRecords.MinResting.Time }}</td>
+            </tr>
+            <tr>
+                <td>max</td>
+                <td>{{ .PersonalRecords.MaxResting.Value }}</td>
+                <td>{{ .PersonalRecords.MaxResting.Time }}</td>
+            </tr>
+        </table>
         <br><br>
         <pre>{{ json . }}</pre>
 

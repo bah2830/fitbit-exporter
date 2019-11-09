@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bah2830/fitbit-exporter/pkg/database"
@@ -27,19 +26,11 @@ var requiredScopes = []string{
 }
 
 type Client struct {
-	users        []*UserClient
+	Users        []*User
 	oauthConfig  *oauth2.Config
 	clientID     string
 	clientSecret string
 	db           *database.Database
-}
-
-type UserClient struct {
-	ID            string
-	Name          string
-	httpClient    *http.Client
-	token         *oauth2.Token
-	Authenticated *sync.WaitGroup
 }
 
 type RequestError struct {
@@ -69,7 +60,7 @@ func NewClient(db *database.Database, clientID, clientSecret string) (*Client, e
 		clientID:     clientID,
 		clientSecret: clientSecret,
 		db:           db,
-		users:        make([]*UserClient, 0),
+		Users:        make([]*User, 0),
 		oauthConfig:  defaultOauthConfig(clientID, clientSecret),
 	}
 
@@ -91,8 +82,8 @@ func defaultOauthConfig(clientID, clientSecret string) *oauth2.Config {
 	}
 }
 
-func (c *Client) GetUser(userID string) (*UserClient, error) {
-	for _, u := range c.users {
+func (c *Client) GetUser(userID string) (*User, error) {
+	for _, u := range c.Users {
 		if u.ID == userID {
 			return u, nil
 		}
@@ -101,21 +92,13 @@ func (c *Client) GetUser(userID string) (*UserClient, error) {
 	return nil, fmt.Errorf("user %s does not exist", userID)
 }
 
-func (c *Client) GetUsers() []*UserClient {
-	var users []*UserClient
-	for _, user := range c.users {
-		users = append(users, user)
-	}
-	return users
-}
-
 func (c *Client) setupAuth() error {
-	tokens, err := c.getPreviousTokens()
+	users, err := c.getAllUsersWithTokens()
 	if err != nil {
 		return err
 	}
 
-	c.users = tokens
+	c.Users = users
 	return nil
 }
 
@@ -141,15 +124,15 @@ func (c *Client) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c.users = append(c.users, &UserClient{
-		ID:            user.ID,
-		Name:          user.FullName,
-		token:         token,
-		httpClient:    httpClient,
-		Authenticated: &sync.WaitGroup{},
-	})
+	user.token = token
+	user.httpClient = httpClient
+	c.Users = append(c.Users, user)
 
-	if err := c.saveTokens(); err != nil {
+	if err := user.save(c.db.GetDB()); err != nil {
+		w.Write([]byte(err.Error()))
+		return
+	}
+	if err := user.saveToken(c.db.GetDB()); err != nil {
 		w.Write([]byte(err.Error()))
 		return
 	}
@@ -157,83 +140,23 @@ func (c *Client) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/"+user.ID, http.StatusTemporaryRedirect)
 }
 
-func (c *Client) getPreviousTokens() ([]*UserClient, error) {
-	rows, err := c.db.GetDB().Query("select user_id, user, access_token, refresh_token, token_type, expiration from token")
-	if err != nil {
-		return nil, err
-	}
-
-	tokens := make([]*UserClient, 0)
-	for rows.Next() {
-		var userID, user, accessToken, refreshToken, tokenType, expiration string
-		if err := rows.Scan(&userID, &user, &accessToken, &refreshToken, &tokenType, &expiration); err != nil {
-			return nil, err
-		}
-
-		expiry, err := time.Parse(database.DateTimeFormat, expiration)
-		if err != nil {
-			return nil, err
-		}
-
-		token := &oauth2.Token{
-			AccessToken:  accessToken,
-			RefreshToken: refreshToken,
-			TokenType:    tokenType,
-			Expiry:       expiry,
-		}
-
-		// If a previous token was found and it hasn't expired then use it rather than wait for auth
-		tokens = append(tokens, &UserClient{
-			ID:            userID,
-			Name:          user,
-			token:         token,
-			httpClient:    c.oauthConfig.Client(oauth2.NoContext, token),
-			Authenticated: &sync.WaitGroup{},
-		})
-	}
-
-	return tokens, nil
-}
-
 func (c *Client) saveTokens() error {
-	for _, userClient := range c.users {
-		if err := c.saveToken(userClient); err != nil {
+	for _, user := range c.Users {
+		if err := user.saveToken(c.db.GetDB()); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *Client) saveToken(user *UserClient) error {
-	// Delete all previous tokens for the user
-	if _, err := c.db.GetDB().Exec("delete from token where user = ?", user.ID); err != nil {
-		return err
-	}
-
-	insertStatement := `insert into token
-	(user_id, user, access_token, refresh_token, token_type, expiration)
-	values (?, ?, ?, ?, ?)`
-
-	_, err := c.db.GetDB().Exec(
-		insertStatement,
-		user.ID,
-		user.Name,
-		user.token.AccessToken,
-		user.token.RefreshToken,
-		user.token.TokenType,
-		user.token.Expiry.Format(database.DateTimeFormat),
-	)
-	return err
-}
-
 func (c *Client) Close() error {
 	defer func() {
-		for _, u := range c.users {
+		for _, u := range c.Users {
 			u.httpClient.CloseIdleConnections()
 		}
 	}()
 
-	for _, user := range c.users {
+	for _, user := range c.Users {
 		// Get the current token and save it. This will help prevent a refreshed token from being missed
 		oauthTransport, ok := user.httpClient.Transport.(*oauth2.Transport)
 		if !ok {

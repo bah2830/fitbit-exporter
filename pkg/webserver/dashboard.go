@@ -1,10 +1,8 @@
 package webserver
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"net/http"
 	"strings"
@@ -63,6 +61,7 @@ func (s *Server) userHandler(w http.ResponseWriter, r *http.Request) {
 	user, ok := vars["user"]
 	if !ok || user == "" {
 		writeErr(w, http.StatusBadRequest, errors.New("user not given"))
+		return
 	}
 
 	top10Hr, err := s.client.GetNHeartRates(user, true, 10)
@@ -150,21 +149,7 @@ func (s *Server) userHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	tmpl, err := template.New("user.template.html").
-		Funcs(template.FuncMap{
-			"json": func(v interface{}) string {
-				a, err := json.MarshalIndent(v, "", "  ")
-				if err != nil {
-					log.Println("error marshaling json output: " + err.Error())
-				}
-				return string(a)
-			},
-			"duration": func(in int) time.Duration {
-				return time.Duration(in) * time.Second
-			},
-		}).
-		ParseFiles("frontend/templates/user.template.html")
-
+	tmpl, err := template.New("user.template.html").Funcs(getTemplateFuncs()).ParseFiles("frontend/templates/user.template.html")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return

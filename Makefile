@@ -18,4 +18,4 @@ start_containers:
 	-docker-compose up -d
 
 remove_containers:
-	-docker-commpose rm -sf
+	-docker-compose rm -sf

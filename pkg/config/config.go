@@ -12,9 +12,8 @@ type Config struct {
 		SessionKey string `yaml:"sessionKey"`
 	} `yaml:"webFrontend"`
 	Fitbit struct {
-		ClientID      string `yaml:"clientId"`
-		ClientSecret  string `yaml:"clientSecret"`
-		BackfillStart string `yaml:"backfillStart"`
+		ClientID     string `yaml:"clientId"`
+		ClientSecret string `yaml:"clientSecret"`
 	}
 	Database struct {
 		Host     string

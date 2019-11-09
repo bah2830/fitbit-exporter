@@ -5,7 +5,6 @@ webFrontend:
 fitbit:
   clientId: 12AB3C
   clientSecret: place-client-secret-for-app-here
-  backfillStart: "2019-01-01"
 
 database:
   database:

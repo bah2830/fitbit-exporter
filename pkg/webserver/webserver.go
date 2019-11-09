@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/bah2830/fitbit-exporter/pkg/config"
 	"github.com/bah2830/fitbit-exporter/pkg/exporter"
@@ -82,12 +83,27 @@ func gzipHandler(fn http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func getTemplateFuncs() template.FuncMap {
+	return template.FuncMap{
+		"json": func(v interface{}) string {
+			a, err := json.MarshalIndent(v, "", "  ")
+			if err != nil {
+				log.Println("error marshaling json output: " + err.Error())
+			}
+			return string(a)
+		},
+		"duration": func(in int) time.Duration {
+			return time.Duration(in) * time.Second
+		},
+	}
+}
+
 func (s *Server) indexHandler(w http.ResponseWriter, r *http.Request) {
-	t, err := template.ParseFiles("frontend/templates/index.template.html")
+	t, err := template.New("index.template.html").Funcs(getTemplateFuncs()).ParseFiles("frontend/templates/index.template.html")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	t.Execute(w, nil)
+	t.Execute(w, s.client.Users)
 }
