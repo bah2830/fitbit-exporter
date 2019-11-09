@@ -1,0 +1,97 @@
+@startuml
+
+skinparam {
+    BoxPadding 5
+    shadowing false
+    sequence {
+        TitleFontStyle None
+        TitleFontSize 16
+
+        ActorBorderColor #000000
+        ActorBackgroundColor #EEEEEE
+
+        ParticipantBorderColor #000000
+        ParticipantBackgroundColor #EEEEEE
+        ParticipantFontColor #000000
+        ParticipantFontSize 12
+        ParticipantBorderThickness 1
+        ParticipantPadding 10
+
+        BoxBorderColor #AAAAAA
+        BoxFontSize 14
+        BoxFontStyle None
+
+        GroupBorderThickness 1
+        GroupHeaderFontStyle None
+        GroupFontStyle None
+        GroupBackgroundColor #DDDDDD
+        GroupBodyBackgroundColor #FAFAFA
+
+        DividerBorderThickness 1
+        DividerBackgroundColor #FFFFFF
+        DividerFontStyle None
+
+        LifeLineBorderColor #555555
+    }
+    Legend {
+        FontSize 10
+        FontStyle None
+        BackgroundColor transparent
+        BorderColor transparent
+    }
+    note {
+        BackgroundColor #FFF5F5
+        BorderColor #000000
+        BorderThickness 1
+    }
+}
+
+autoactivate on
+
+actor "web user" as user order 10
+participant "web interface" as web order 20
+participant "backfiller" as back order 30
+participant "database" as db order 40
+participant "fitbit" as fit order 50
+
+== Service Startup ==
+
+back -> db: Get list of users with tokens
+return
+
+loop hourly
+    loop users
+        loop days in reverse starting from current day
+            back -> fit: get user heartrate data for specific day
+            return
+
+            alt data received
+                back -> db: store heart data
+                return
+            else
+                note over back
+                    increment no data counter
+
+                    If counter hits 2 continue user loop as current user is complete
+                end note
+            end
+        end
+    end
+end
+
+== New User Login ==
+
+user -> web: /login
+    web -> fit: fitbit oauth
+    return
+
+    web -> back: notify of new user
+    return
+return /callback
+
+note over back
+    backfiller executes immediately
+    for the new user
+end note
+
+@enduml
